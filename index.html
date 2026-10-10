@@ -7,6 +7,18 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+// 구글 애널리틱스(GA4): 아래 측정 ID를 본인 것(G-로 시작)으로 바꾸면 켜져요.
+const GA_ID='G-XXXXXXXXXX';
+const GA_ON=!GA_ID.includes('XXXX');
+window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}
+if(GA_ON){
+  const t=document.createElement('script');t.async=true;
+  t.src='https://www.googletagmanager.com/gtag/js?id='+GA_ID;document.head.appendChild(t);
+  gtag('js',new Date());gtag('config',GA_ID);
+}
+const track=n=>{if(GA_ON)gtag('event',n);};
+</script>
 <style>
 :root{--sea:#12343b;--land:#e8d9a8;--ink:#0b1c20;--page:#0f2327;--txt:#f1ead2}
 *{box-sizing:border-box}
@@ -46,7 +58,7 @@ button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
 
 <script>
 const W=90,H=60,C=10,PS=32,BALLS=1;
-const LOBBY='ttang-lobby-v1-',SLOTS=6;
+const LOBBY='ttang-lobby-v1-',SLOTS=20;
 const $=id=>document.getElementById(id);
 const cv=$('c'),g=cv.getContext('2d');cv.width=W*C;cv.height=H*C;
 const ly=document.createElement('canvas'),lg=ly.getContext('2d');
@@ -61,7 +73,7 @@ const HOME=[null,[4,30],[85,30]];
 
 let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[4,30],[85,30]],base=new Uint8Array(W*H),dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
 let role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
-let local=null,peer=null,conn=null,call=null,session=0,obAct=null;
+let local=null,peer=null,lobby=null,conn=null,call=null,session=0,obAct=null;
 
 /* ---------- 게임 규칙 (호스트가 계산) ---------- */
 function initGame(){
@@ -161,29 +173,53 @@ function setDir(d){
 function cleanup(){
   session++;
   for(const o of [conn,call])try{o&&o.close();}catch(e){}
-  try{peer&&peer.destroy();}catch(e){}
-  conn=call=peer=null;role=0;rv.srcObject=null;
+  for(const o of [peer,lobby])try{o&&o.destroy();}catch(e){}
+  conn=call=peer=lobby=null;role=0;rv.srcObject=null;
 }
 function setRemote(s){rv.srcObject=s;rv.play().catch(()=>{});}
 function beginMatch(r){
-  role=r;initGame();state='play';$('ov').style.display='none';last=performance.now();
+  track('match_start');role=r;initGame();state='play';$('ov').style.display='none';last=performance.now();
 }
 function peerGone(my){
   if(my!==session)return;
   cleanup();state='over';
   showOv('상대가 나갔어요','새로운 상대를 찾아볼까요?','다른 상대 찾기',startFind);
 }
+function fail(my){
+  if(my!==session)return;
+  cleanup();state='over';
+  showOv('연결에 실패했어요','잠시 후 다시 시도해 주세요.','다시 찾기',startFind);
+}
+// 대기 슬롯(lobby)은 만남만 주선하고, 실제 게임은 임의 ID의 개인 방(peer)에서 진행해요.
+// 그래서 매칭이 끝나면 슬롯이 바로 비어요.
 function hostWait(p,my){
+  lobby=p;let taken=false,going=false;
   showOv('상대를 기다리는 중…','다른 사람이 접속하면 바로 시작돼요.','취소',cancel);
   p.on('connection',c=>{
-    if(conn||my!==session){c.on('open',()=>c.close());return;}
-    conn=c;
+    if(taken||my!==session){c.on('open',()=>c.close());return;}
+    taken=true;
+    c.on('close',()=>{if(!going)taken=false;});
     c.on('open',()=>{
-      c.send({t:'ready'});
-      call=p.call(c.peer,local);call.on('stream',setRemote);
-      beginMatch(1);
+      const gp=new Peer();
+      gp.on('error',()=>{});
+      gp.on('open',id=>{
+        if(!c.open||my!==session){try{gp.destroy();}catch(e){}taken=false;return;}
+        going=true;peer=gp;
+        c.send({t:'go',id});
+        setTimeout(()=>{try{p.destroy();}catch(e){}if(lobby===p)lobby=null;},800);
+        const to=setTimeout(()=>{if(!conn)fail(my);},12000);
+        gp.on('connection',c2=>{
+          if(conn){c2.on('open',()=>c2.close());return;}
+          conn=c2;clearTimeout(to);
+          c2.on('data',onData);c2.on('close',()=>peerGone(my));
+          c2.on('open',()=>{
+            c2.send({t:'ready'});
+            call=gp.call(c2.peer,local);call.on('stream',setRemote);
+            beginMatch(1);
+          });
+        });
+      });
     });
-    c.on('data',onData);c.on('close',()=>peerGone(my));
   });
   p.on('error',()=>{});
 }
@@ -198,12 +234,19 @@ function joinSlot(id,my){
     p.on('open',()=>{
       const c=p.connect(id,{serialization:'json',reliable:true});
       c.on('error',()=>fin(false));
-      c.on('close',()=>{if(!done)fin(false);else peerGone(my);});
+      c.on('close',()=>fin(false)); // 'go'를 받은 뒤의 종료는 무시됨
       c.on('data',d=>{
-        if(d.t==='ready'&&!done){
-          if(my!==session){fin(false);return;}
-          peer=p;conn=c;fin(true);beginMatch(2);
-        }else onData(d);
+        if(d.t!=='go'||done)return;
+        if(my!==session){fin(false);return;}
+        peer=p;fin(true);
+        const c2=p.connect(d.id,{serialization:'json',reliable:true});
+        const to=setTimeout(()=>{if(!conn)fail(my);},12000);
+        c2.on('data',m=>{
+          if(m.t==='ready'&&!conn){conn=c2;clearTimeout(to);beginMatch(2);}
+          else onData(m);
+        });
+        c2.on('close',()=>{if(conn)peerGone(my);else fail(my);});
+        c2.on('error',()=>{});
       });
     });
   });
@@ -215,7 +258,7 @@ function trySlot(id,my){
     const p=new Peer(id);
     p.on('open',()=>{
       if(my!==session){p.destroy();return fin(true);}
-      peer=p;hostWait(p,my);fin(true);
+      hostWait(p,my);fin(true);
     });
     p.on('error',e=>{
       if(done)return;
@@ -245,7 +288,7 @@ async function startFind(){
   if(!(await ensureLocal())){
     showOv('카메라 권한이 필요해요','브라우저의 카메라·마이크 권한(HTTPS 필요)을 허용한 뒤 다시 시도해 주세요.','다시 시도',startFind);return;
   }
-  find();
+  track('find_match');find();
 }
 $('re').onclick=startFind;
 $('mic').onclick=()=>{
