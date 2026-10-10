@@ -49,22 +49,27 @@ const W=90,H=60,C=10,PS=32,BALLS=1;
 const LOBBY='ttang-lobby-v1-',SLOTS=6;
 const $=id=>document.getElementById(id);
 const cv=$('c'),g=cv.getContext('2d');cv.width=W*C;cv.height=H*C;
-const ly=document.createElement('canvas'),lg=ly.getContext('2d'),mk=document.createElement('canvas'),mg=mk.getContext('2d');
-ly.width=cv.width;ly.height=cv.height;mk.width=W;mk.height=H;
+const ly=document.createElement('canvas'),lg=ly.getContext('2d');
+ly.width=cv.width;ly.height=cv.height;
+const mks=[null,document.createElement('canvas'),document.createElement('canvas')]; // 플레이어별 영역 마스크
+mks.slice(1).forEach(m=>{m.width=W;m.height=H;});
 const lv=$('lv'),rv=$('rv');
 const DX=[0,0,1,0,-1],DY=[0,-1,0,1,0]; // 1 위, 2 오른쪽, 3 아래, 4 왼쪽
 const COL=['','#f4b942','#ff6fae'];
 const TINT=['','rgba(244,185,66,.22)','rgba(255,111,174,.22)'],SOLID=['','rgba(244,185,66,.85)','rgba(255,111,174,.85)'];
-const HOME=[null,[45,4],[45,55]];
+const HOME=[null,[4,30],[85,30]];
 
-let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[45,4],[45,55]],dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
+let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[4,30],[85,30]],base=new Uint8Array(W*H),dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
 let role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
 let local=null,peer=null,conn=null,call=null,session=0,obAct=null;
 
 /* ---------- 게임 규칙 (호스트가 계산) ---------- */
 function initGame(){
   grid=new Uint8Array(W*H);
-  for(let y=0;y<9;y++)for(let x=40;x<=50;x++){grid[y*W+x]=1;grid[(H-1-y)*W+x]=2;}
+  base=new Uint8Array(W*H); // 시작 영역(기지): 상대가 들어오거나 차지할 수 없음
+  for(let y=24;y<=35;y++)for(let x=0;x<=8;x++){
+    grid[y*W+x]=1;base[y*W+x]=1;grid[y*W+W-1-x]=2;base[y*W+W-1-x]=2;
+  }
   tr=[null,[],[]];un=[null,[],[]];pos=[null,HOME[1].slice(),HOME[2].slice()];dirs=[0,0,0];deaths=[0,0,0];acc=0;
   balls=[];
   for(let i=0;i<BALLS;i++){let a=Math.random()*6.28;if(Math.abs(Math.sin(2*a))<.3)a+=.5;balls.push({x:45,y:30,a,s:18});}
@@ -74,32 +79,28 @@ function calc(){
   let a=0,b=0;
   for(let i=0;i<grid.length;i++){const v=grid[i];if(v===1)a++;else if(v===2)b++;}
   pct=[0,a/grid.length*100,b/grid.length*100];
-  const im=mg.createImageData(W,H);
-  for(let i=0;i<grid.length;i++)if(grid[i]===1||grid[i]===2)im.data[i*4+3]=255;
-  mg.putImageData(im,0,0);
+  for(let k=1;k<=2;k++){
+    const im=new ImageData(W,H);
+    for(let i=0;i<grid.length;i++)if(grid[i]===k)im.data[i*4+3]=255;
+    mks[k].getContext('2d').putImageData(im,0,0);
+  }
   const me=role||1,you=3-me;
   $('me').textContent=Math.floor(pct[me])+'%';$('me').style.color=COL[me];
   $('you').textContent=Math.floor(pct[you])+'%';$('you').style.color=COL[you];
 }
 const at=(x,y)=>{const cx=Math.floor(x),cy=Math.floor(y);return(cx<0||cy<0||cx>=W||cy>=H)?1:grid[cy*W+cx];};
-function grantHome(k){
-  const[hx,hy]=HOME[k];
-  for(let y=hy-2;y<=hy+2;y++)for(let x=hx-2;x<=hx+2;x++){
-    if(balls.some(b=>Math.abs(b.x-x-.5)<2&&Math.abs(b.y-y-.5)<2))continue;
-    if(grid[y*W+x]<3)grid[y*W+x]=k;
-  }
-}
 function die(k){ // 선이 끊기면 지워지고 내 집으로 복귀
   for(let j=0;j<tr[k].length;j++)grid[tr[k][j]]=un[k][j];
   tr[k]=[];un[k]=[];dirs[k]=0;deaths[k]++;pos[k]=HOME[k].slice();
   if(k===role)flash=18;
-  grantHome(k);calc();
+  calc();
 }
 function stepPlayer(k){
   const d=dirs[k];if(!d)return;
   const o=3-k,nx=pos[k][0]+DX[d],ny=pos[k][1]+DY[d];
   if(nx<0||ny<0||nx>=W||ny>=H)return;
   const i=ny*W+nx;
+  if(base[i]&&base[i]!==k)return; // 상대 기지에는 못 들어감
   if(grid[i]===k+2)return;      // 내 선은 못 지나감
   if(grid[i]===o+2)die(o);      // 상대 선을 끊음
   const v=grid[i];
@@ -112,17 +113,18 @@ function capture(k){
   for(const i of tr[k])grid[i]=k;
   tr[k]=[];un[k]=[];dirs[k]=0;
   const seen=new Uint8Array(W*H),st=[];
-  for(const b of balls){const i=Math.floor(b.y)*W+Math.floor(b.x);if(!seen[i]&&grid[i]!==k){seen[i]=1;st.push(i);}}
-  const add=j=>{if(!seen[j]&&grid[j]!==k){seen[j]=1;st.push(j);}};
+  const open=j=>grid[j]!==k&&!base[j]; // 기지는 에워싸도 차지할 수 없음
+  for(const b of balls){const i=Math.floor(b.y)*W+Math.floor(b.x);if(!seen[i]&&open(i)){seen[i]=1;st.push(i);}}
+  const add=j=>{if(!seen[j]&&open(j)){seen[j]=1;st.push(j);}};
   while(st.length){
     const i=st.pop(),x=i%W,y=(i/W)|0;
     if(x>0)add(i-1);if(x<W-1)add(i+1);if(y>0)add(i-W);if(y<H-1)add(i+W);
   }
-  let cut=false;
-  for(let i=0;i<grid.length;i++)if(grid[i]===o+2&&!seen[i]){cut=true;break;}
-  if(cut)die(o); // 내가 에워싼 안쪽에 갇힌 상대 선은 끊김
-  for(let i=0;i<grid.length;i++)if(grid[i]!==k&&!seen[i])grid[i]=k; // 상대 땅도 에워싸면 내 땅
-  if(cut)grantHome(o);
+  const pi=pos[o][1]*W+pos[o][0];
+  let cut=open(pi)&&!seen[pi]; // 상대가 서 있는 자리를 에워쌌다
+  for(let i=0;i<grid.length&&!cut;i++)if(grid[i]===o+2&&!seen[i])cut=true; // 상대의 선을 에워쌌다
+  if(cut)die(o);
+  for(let i=0;i<grid.length;i++)if(open(i)&&!seen[i])grid[i]=k;
   calc();
 }
 function stepBall(b,dt){
@@ -256,21 +258,21 @@ function showOv(t,m,b,act){$('ot').textContent=t;$('om').textContent=m;$('ob').t
 $('ob').onclick=()=>obAct&&obAct();
 
 /* ---------- 그리기 ---------- */
-function drawCam(){
-  const hw=cv.width/2,ok=[false,false];
-  lg.globalCompositeOperation='source-over';lg.clearRect(0,0,ly.width,ly.height);
-  for(let s=0;s<2;s++){
-    const v=(s===0)===(role!==2)?lv:rv,vw=v.videoWidth,vh=v.videoHeight;
+function drawCam(){ // 내 영역에는 상대 카메라, 상대 영역에는 내 카메라
+  const ok=[false,false,false],me=role||1;
+  for(let k=1;k<=2;k++){
+    const v=(3-k)===me?lv:rv,vw=v.videoWidth,vh=v.videoHeight;
     if(!vw)continue;
-    const sc=Math.max(hw/vw,cv.height/vh),dw=vw*sc,dh=vh*sc,x0=s*hw;
-    lg.save();lg.beginPath();lg.rect(x0,0,hw,cv.height);lg.clip();
-    if(v===lv){lg.translate(x0+hw/2,0);lg.scale(-1,1);lg.drawImage(v,-dw/2,(cv.height-dh)/2,dw,dh);} // 내 화면은 거울처럼
-    else lg.drawImage(v,x0+(hw-dw)/2,(cv.height-dh)/2,dw,dh);
-    lg.restore();ok[s]=true;
+    lg.globalCompositeOperation='source-over';lg.clearRect(0,0,ly.width,ly.height);
+    const sc=Math.max(cv.width/vw,cv.height/vh),dw=vw*sc,dh=vh*sc;
+    lg.save();
+    if(v===lv){lg.translate(cv.width,0);lg.scale(-1,1);} // 내 영상은 거울처럼
+    lg.drawImage(v,(cv.width-dw)/2,(cv.height-dh)/2,dw,dh);
+    lg.restore();
+    lg.globalCompositeOperation='destination-in';lg.imageSmoothingEnabled=false;
+    lg.drawImage(mks[k],0,0,cv.width,cv.height);
+    g.drawImage(ly,0,0);ok[k]=true;
   }
-  lg.globalCompositeOperation='destination-in';lg.imageSmoothingEnabled=false;
-  lg.drawImage(mk,0,0,cv.width,cv.height);
-  g.drawImage(ly,0,0);
   return ok;
 }
 function draw(){
@@ -280,7 +282,7 @@ function draw(){
   for(let y=0;y<H;y++)for(let x=0;x<W;x++){
     const v=grid[y*W+x];if(!v)continue;
     let key,style;
-    if(v<=2){const solid=!ok[x<W/2?0:1];key=v*2+(solid?1:0);style=solid?SOLID[v]:TINT[v];}
+    if(v<=2){const solid=!ok[v];key=v*2+(solid?1:0);style=solid?SOLID[v]:TINT[v];}
     else{key=10+v;style=COL[v-2];}
     if(key!==cur){g.fillStyle=style;cur=key;}
     g.fillRect(x*C,y*C,C,C);
@@ -293,7 +295,6 @@ function draw(){
     if(x<W-1&&grid[y*W+x+1]!==v)g.fillRect(x*C+C-2,y*C,2,C);
     if(x>0&&grid[y*W+x-1]!==v)g.fillRect(x*C,y*C,2,C);
   }
-  g.fillStyle='rgba(241,234,210,.25)';g.fillRect(cv.width/2-1,0,2,cv.height);
   for(const b of balls){
     g.fillStyle='#f1ead2';g.beginPath();g.arc(b.x*C,b.y*C,C*.9,0,7);g.fill();
     g.strokeStyle='#0b1c20';g.lineWidth=3;g.stroke();
@@ -335,7 +336,7 @@ cv.addEventListener('touchmove',e=>{
   setDir(Math.abs(dx)>Math.abs(dy)?(dx>0?2:4):(dy>0?3:1));tx=x;ty=y;
 },{passive:false});
 
-const MENU_MSG='접속한 사람 중 한 명과 연결돼요. 가운데 위(노랑)와 아래(분홍)에서 출발해 땅을 넓히세요. 상대의 선을 끊거나 상대의 땅을 에워쌀 수도 있어요. 공이나 상대가 내 선을 끊으면 집으로 돌아가요. 승패는 없어요. 카메라·마이크는 상대에게만 직접 전달돼요.';
+const MENU_MSG='접속한 사람 중 한 명과 연결돼요. 왼쪽(노랑)과 오른쪽(분홍) 기지에서 출발해 땅을 넓히세요. 내 땅에는 상대 카메라가, 상대 땅에는 내 카메라가 보여요. 기지는 상대가 들어오거나 차지할 수 없어요. 상대의 선을 끊거나, 상대가 서 있는 자리를 에워싸면 상대는 기지로 돌아가요. 승패는 없어요. 카메라·마이크는 상대에게만 직접 전달돼요.';
 grid=new Uint8Array(W*H);
 showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind);
 requestAnimationFrame(loop);
