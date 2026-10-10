@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>땅따먹기 대전</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--sea:#12343b;--land:#e8d9a8;--ink:#0b1c20;--page:#0f2327;--txt:#f1ead2}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--page);color:var(--txt);
+  font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:100vh;
+  padding:max(8px,env(safe-area-inset-top)) 8px max(8px,env(safe-area-inset-bottom))}
+#hud{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:6px 20px;font-size:16px}
+#hud b{font-family:"Black Han Sans",system-ui,sans-serif;font-weight:400;font-size:22px;margin-left:6px}
+#wrap{position:relative;width:min(100%,900px)}
+canvas{width:100%;display:block;border:3px solid var(--land);border-radius:6px;touch-action:none;background:var(--sea)}
+#ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;background:rgba(11,28,32,.88);text-align:center;padding:18px;border-radius:4px}
+#ov h1{margin:0;font-family:"Black Han Sans",system-ui,sans-serif;font-weight:400;font-size:clamp(32px,7vw,56px);color:var(--land)}
+#ov p{margin:0;max-width:36em;line-height:1.6;font-size:clamp(13px,2.5vw,16px)}
+button{font:inherit;font-size:16px;padding:8px 20px;border:0;border-radius:4px;background:var(--land);color:var(--ink);cursor:pointer}
+#ob{font-size:18px;padding:10px 30px}
+button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
+#help{font-size:13px;opacity:.7;text-align:center}
+.hid{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud">
+  <span>나<b id="me">0%</b></span>
+  <span>상대<b id="you">0%</b></span>
+  <button id="mic">마이크 끄기</button>
+  <button id="re">다른 상대 찾기</button>
+</div>
+<div id="wrap">
+  <canvas id="c" aria-label="땅따먹기 대전 화면"></canvas>
+  <video id="lv" class="hid" playsinline muted></video>
+  <video id="rv" class="hid" playsinline></video>
+  <div id="ov"><h1 id="ot"></h1><p id="om"></p><button id="ob"></button></div>
+</div>
+<div id="help">방향키 / WASD / 스와이프로 이동 · 스페이스: 멈춤 · 에코 방지를 위해 이어폰을 권장해요</div>
+
+<script>
+const W=90,H=60,C=10,PS=32,BALLS=1;
+const LOBBY='ttang-lobby-v1-',SLOTS=6;
+const $=id=>document.getElementById(id);
+const cv=$('c'),g=cv.getContext('2d');cv.width=W*C;cv.height=H*C;
+const ly=document.createElement('canvas'),lg=ly.getContext('2d'),mk=document.createElement('canvas'),mg=mk.getContext('2d');
+ly.width=cv.width;ly.height=cv.height;mk.width=W;mk.height=H;
+const lv=$('lv'),rv=$('rv');
+const DX=[0,0,1,0,-1],DY=[0,-1,0,1,0]; // 1 위, 2 오른쪽, 3 아래, 4 왼쪽
+const COL=['','#f4b942','#ff6fae'];
+const TINT=['','rgba(244,185,66,.22)','rgba(255,111,174,.22)'],SOLID=['','rgba(244,185,66,.85)','rgba(255,111,174,.85)'];
+const HOME=[null,[45,4],[45,55]];
+
+let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[45,4],[45,55]],dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
+let role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
+let local=null,peer=null,conn=null,call=null,session=0,obAct=null;
+
+/* ---------- 게임 규칙 (호스트가 계산) ---------- */
+function initGame(){
+  grid=new Uint8Array(W*H);
+  for(let y=0;y<9;y++)for(let x=40;x<=50;x++){grid[y*W+x]=1;grid[(H-1-y)*W+x]=2;}
+  tr=[null,[],[]];un=[null,[],[]];pos=[null,HOME[1].slice(),HOME[2].slice()];dirs=[0,0,0];deaths=[0,0,0];acc=0;
+  balls=[];
+  for(let i=0;i<BALLS;i++){let a=Math.random()*6.28;if(Math.abs(Math.sin(2*a))<.3)a+=.5;balls.push({x:45,y:30,a,s:18});}
+  calc();
+}
+function calc(){
+  let a=0,b=0;
+  for(let i=0;i<grid.length;i++){const v=grid[i];if(v===1)a++;else if(v===2)b++;}
+  pct=[0,a/grid.length*100,b/grid.length*100];
+  const im=mg.createImageData(W,H);
+  for(let i=0;i<grid.length;i++)if(grid[i]===1||grid[i]===2)im.data[i*4+3]=255;
+  mg.putImageData(im,0,0);
+  const me=role||1,you=3-me;
+  $('me').textContent=Math.floor(pct[me])+'%';$('me').style.color=COL[me];
+  $('you').textContent=Math.floor(pct[you])+'%';$('you').style.color=COL[you];
+}
+const at=(x,y)=>{const cx=Math.floor(x),cy=Math.floor(y);return(cx<0||cy<0||cx>=W||cy>=H)?1:grid[cy*W+cx];};
+function grantHome(k){
+  const[hx,hy]=HOME[k];
+  for(let y=hy-2;y<=hy+2;y++)for(let x=hx-2;x<=hx+2;x++){
+    if(balls.some(b=>Math.abs(b.x-x-.5)<2&&Math.abs(b.y-y-.5)<2))continue;
+    if(grid[y*W+x]<3)grid[y*W+x]=k;
+  }
+}
+function die(k){ // 선이 끊기면 지워지고 내 집으로 복귀
+  for(let j=0;j<tr[k].length;j++)grid[tr[k][j]]=un[k][j];
+  tr[k]=[];un[k]=[];dirs[k]=0;deaths[k]++;pos[k]=HOME[k].slice();
+  if(k===role)flash=18;
+  grantHome(k);calc();
+}
+function stepPlayer(k){
+  const d=dirs[k];if(!d)return;
+  const o=3-k,nx=pos[k][0]+DX[d],ny=pos[k][1]+DY[d];
+  if(nx<0||ny<0||nx>=W||ny>=H)return;
+  const i=ny*W+nx;
+  if(grid[i]===k+2)return;      // 내 선은 못 지나감
+  if(grid[i]===o+2)die(o);      // 상대 선을 끊음
+  const v=grid[i];
+  pos[k]=[nx,ny];
+  if(v===k){if(tr[k].length)capture(k);}
+  else{tr[k].push(i);un[k].push(v);grid[i]=k+2;}
+}
+function capture(k){
+  const o=3-k;
+  for(const i of tr[k])grid[i]=k;
+  tr[k]=[];un[k]=[];dirs[k]=0;
+  const seen=new Uint8Array(W*H),st=[];
+  for(const b of balls){const i=Math.floor(b.y)*W+Math.floor(b.x);if(!seen[i]&&grid[i]!==k){seen[i]=1;st.push(i);}}
+  const add=j=>{if(!seen[j]&&grid[j]!==k){seen[j]=1;st.push(j);}};
+  while(st.length){
+    const i=st.pop(),x=i%W,y=(i/W)|0;
+    if(x>0)add(i-1);if(x<W-1)add(i+1);if(y>0)add(i-W);if(y<H-1)add(i+W);
+  }
+  let cut=false;
+  for(let i=0;i<grid.length;i++)if(grid[i]===o+2&&!seen[i]){cut=true;break;}
+  if(cut)die(o); // 내가 에워싼 안쪽에 갇힌 상대 선은 끊김
+  for(let i=0;i<grid.length;i++)if(grid[i]!==k&&!seen[i])grid[i]=k; // 상대 땅도 에워싸면 내 땅
+  if(cut)grantHome(o);
+  calc();
+}
+function stepBall(b,dt){
+  const d=b.s*dt,n=Math.max(1,Math.ceil(d/.3)),s=d/n;
+  for(let i=0;i<n;i++){
+    let vx=Math.cos(b.a),vy=Math.sin(b.a);
+    const nx=b.x+vx*s,ny=b.y+vy*s,cx=at(nx,b.y),cy=at(b.x,ny),cd=at(nx,ny);
+    const hit=[cx,cy,cd].find(v=>v>=3);
+    if(hit){die(hit-2);return true;}
+    let hx=cx!==0,hy=cy!==0;
+    if(!hx&&!hy&&cd!==0)hx=hy=true;
+    if(hx||hy){if(hx)vx=-vx;if(hy)vy=-vy;b.a=Math.atan2(vy,vx)+(Math.random()-.5)*.1;continue;}
+    b.x=nx;b.y=ny;
+  }
+  return false;
+}
+
+/* ---------- 네트워크 ---------- */
+const enc=()=>{const a=[];let p=grid[0],n=1;for(let i=1;i<grid.length;i++){if(grid[i]===p)n++;else{a.push(p,n);p=grid[i];n=1;}}a.push(p,n);return a;};
+const dec=a=>{let j=0;for(let i=0;i<a.length;i+=2){grid.fill(a[i],j,j+a[i+1]);j+=a[i+1];}};
+function onData(d){
+  if(role===1&&d.t==='in')dirs[2]=d.d;
+  else if(role===2&&d.t==='st'){
+    dec(d.g);balls=d.b.map(([x,y,a,s])=>({x,y,a,s}));pos=[null,d.p[1],d.p[2]];
+    if(d.d[2]!==deaths[2])flash=18;
+    deaths=d.d;calc();
+  }
+}
+function setDir(d){
+  if(state!=='play')return;
+  if(role===1)dirs[1]=d;
+  else if(role===2){dirs[2]=d;if(conn&&conn.open)conn.send({t:'in',d});}
+}
+function cleanup(){
+  session++;
+  for(const o of [conn,call])try{o&&o.close();}catch(e){}
+  try{peer&&peer.destroy();}catch(e){}
+  conn=call=peer=null;role=0;rv.srcObject=null;
+}
+function setRemote(s){rv.srcObject=s;rv.play().catch(()=>{});}
+function beginMatch(r){
+  role=r;initGame();state='play';$('ov').style.display='none';last=performance.now();
+}
+function peerGone(my){
+  if(my!==session)return;
+  cleanup();state='over';
+  showOv('상대가 나갔어요','새로운 상대를 찾아볼까요?','다른 상대 찾기',startFind);
+}
+function hostWait(p,my){
+  showOv('상대를 기다리는 중…','다른 사람이 접속하면 바로 시작돼요.','취소',cancel);
+  p.on('connection',c=>{
+    if(conn||my!==session){c.on('open',()=>c.close());return;}
+    conn=c;
+    c.on('open',()=>{
+      c.send({t:'ready'});
+      call=p.call(c.peer,local);call.on('stream',setRemote);
+      beginMatch(1);
+    });
+    c.on('data',onData);c.on('close',()=>peerGone(my));
+  });
+  p.on('error',()=>{});
+}
+function joinSlot(id,my){
+  return new Promise(res=>{
+    let done=false,tm;
+    const p=new Peer();
+    const fin=v=>{if(done)return;done=true;clearTimeout(tm);if(!v)try{p.destroy();}catch(e){}res(v);};
+    tm=setTimeout(()=>fin(false),5000);
+    p.on('error',()=>fin(false));
+    p.on('call',cl=>{cl.answer(local);call=cl;cl.on('stream',setRemote);});
+    p.on('open',()=>{
+      const c=p.connect(id,{serialization:'json',reliable:true});
+      c.on('error',()=>fin(false));
+      c.on('close',()=>{if(!done)fin(false);else peerGone(my);});
+      c.on('data',d=>{
+        if(d.t==='ready'&&!done){
+          if(my!==session){fin(false);return;}
+          peer=p;conn=c;fin(true);beginMatch(2);
+        }else onData(d);
+      });
+    });
+  });
+}
+function trySlot(id,my){
+  return new Promise(res=>{
+    let done=false;
+    const fin=v=>{if(!done){done=true;res(v);}};
+    const p=new Peer(id);
+    p.on('open',()=>{
+      if(my!==session){p.destroy();return fin(true);}
+      peer=p;hostWait(p,my);fin(true);
+    });
+    p.on('error',e=>{
+      if(done)return;
+      try{p.destroy();}catch(_){}
+      if(e.type==='unavailable-id')joinSlot(id,my).then(fin);else fin(false);
+    });
+  });
+}
+async function find(){
+  cleanup();const my=session;state='search';
+  showOv('상대를 찾는 중…','잠시만 기다려 주세요.','취소',cancel);
+  for(let r=0;r<2&&my===session;r++)
+    for(let i=0;i<SLOTS&&my===session;i++)
+      if(await trySlot(LOBBY+i,my))return;
+  if(my===session)showOv('연결에 실패했어요','잠시 후 다시 시도해 주세요.','다시 찾기',startFind);
+}
+function cancel(){cleanup();state='menu';showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind);}
+async function ensureLocal(){
+  if(local)return true;
+  const v={facingMode:'user',width:{ideal:960},height:{ideal:720}};
+  try{local=await navigator.mediaDevices.getUserMedia({video:v,audio:{echoCancellation:true,noiseSuppression:true}});}
+  catch(e){try{local=await navigator.mediaDevices.getUserMedia({video:v,audio:false});}catch(e2){return false;}}
+  lv.srcObject=local;lv.play().catch(()=>{});
+  return true;
+}
+async function startFind(){
+  if(!(await ensureLocal())){
+    showOv('카메라 권한이 필요해요','브라우저의 카메라·마이크 권한(HTTPS 필요)을 허용한 뒤 다시 시도해 주세요.','다시 시도',startFind);return;
+  }
+  find();
+}
+$('re').onclick=startFind;
+$('mic').onclick=()=>{
+  if(!local)return;
+  const t=local.getAudioTracks();if(!t.length)return;
+  const on=!t[0].enabled;t.forEach(x=>x.enabled=on);
+  $('mic').textContent=on?'마이크 끄기':'마이크 켜기';
+};
+function showOv(t,m,b,act){$('ot').textContent=t;$('om').textContent=m;$('ob').textContent=b;obAct=act;$('ov').style.display='flex';}
+$('ob').onclick=()=>obAct&&obAct();
+
+/* ---------- 그리기 ---------- */
+function drawCam(){
+  const hw=cv.width/2,ok=[false,false];
+  lg.globalCompositeOperation='source-over';lg.clearRect(0,0,ly.width,ly.height);
+  for(let s=0;s<2;s++){
+    const v=(s===0)===(role!==2)?lv:rv,vw=v.videoWidth,vh=v.videoHeight;
+    if(!vw)continue;
+    const sc=Math.max(hw/vw,cv.height/vh),dw=vw*sc,dh=vh*sc,x0=s*hw;
+    lg.save();lg.beginPath();lg.rect(x0,0,hw,cv.height);lg.clip();
+    if(v===lv){lg.translate(x0+hw/2,0);lg.scale(-1,1);lg.drawImage(v,-dw/2,(cv.height-dh)/2,dw,dh);} // 내 화면은 거울처럼
+    else lg.drawImage(v,x0+(hw-dw)/2,(cv.height-dh)/2,dw,dh);
+    lg.restore();ok[s]=true;
+  }
+  lg.globalCompositeOperation='destination-in';lg.imageSmoothingEnabled=false;
+  lg.drawImage(mk,0,0,cv.width,cv.height);
+  g.drawImage(ly,0,0);
+  return ok;
+}
+function draw(){
+  g.fillStyle='#12343b';g.fillRect(0,0,cv.width,cv.height);
+  if(!grid)return;
+  const ok=drawCam();let cur=-1;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const v=grid[y*W+x];if(!v)continue;
+    let key,style;
+    if(v<=2){const solid=!ok[x<W/2?0:1];key=v*2+(solid?1:0);style=solid?SOLID[v]:TINT[v];}
+    else{key=10+v;style=COL[v-2];}
+    if(key!==cur){g.fillStyle=style;cur=key;}
+    g.fillRect(x*C,y*C,C,C);
+  }
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ // 영역 가장자리선
+    const v=grid[y*W+x];if(v!==1&&v!==2)continue;
+    g.fillStyle=COL[v];
+    if(y<H-1&&grid[(y+1)*W+x]!==v)g.fillRect(x*C,y*C+C-2,C,2);
+    if(y>0&&grid[(y-1)*W+x]!==v)g.fillRect(x*C,y*C,C,2);
+    if(x<W-1&&grid[y*W+x+1]!==v)g.fillRect(x*C+C-2,y*C,2,C);
+    if(x>0&&grid[y*W+x-1]!==v)g.fillRect(x*C,y*C,2,C);
+  }
+  g.fillStyle='rgba(241,234,210,.25)';g.fillRect(cv.width/2-1,0,2,cv.height);
+  for(const b of balls){
+    g.fillStyle='#f1ead2';g.beginPath();g.arc(b.x*C,b.y*C,C*.9,0,7);g.fill();
+    g.strokeStyle='#0b1c20';g.lineWidth=3;g.stroke();
+  }
+  for(let k=1;k<=2;k++){
+    const[x,y]=pos[k];
+    g.fillStyle='#0b1c20';g.fillRect(x*C-2,y*C-2,C+4,C+4);
+    g.fillStyle=COL[k];g.fillRect(x*C+1,y*C+1,C-2,C-2);
+    if(k===(role||1)){g.strokeStyle='#fff';g.lineWidth=2;g.strokeRect(x*C-4,y*C-4,C+8,C+8);}
+  }
+  if(flash>0){g.fillStyle='rgba(228,87,46,'+flash/40+')';g.fillRect(0,0,cv.width,cv.height);flash--;}
+}
+function loop(t){
+  const dt=Math.min((t-last)/1000,.05);last=t;
+  if(state==='play'){
+    if(role===1){
+      acc+=dt;while(acc>=1/PS){acc-=1/PS;stepPlayer(1);stepPlayer(2);}
+      for(const b of balls)if(stepBall(b,dt))break;
+      sendT+=dt;
+      if(sendT>=.05&&conn&&conn.open){sendT=0;conn.send({t:'st',g:enc(),b:balls.map(b=>[b.x,b.y,b.a,b.s]),p:pos,d:deaths});}
+    }else if(role===2){for(const b of balls){b.x+=Math.cos(b.a)*b.s*dt;b.y+=Math.sin(b.a)*b.s*dt;}}
+  }
+  draw();requestAnimationFrame(loop);
+}
+
+/* ---------- 입력 ---------- */
+const KEYS={ArrowUp:1,w:1,W:1,ArrowRight:2,d:2,D:2,ArrowDown:3,s:3,S:3,ArrowLeft:4,a:4,A:4};
+addEventListener('keydown',e=>{
+  if(state!=='play')return;
+  if(KEYS[e.key]){setDir(KEYS[e.key]);e.preventDefault();}
+  else if(e.key===' '){setDir(0);e.preventDefault();}
+});
+let tx=0,ty=0;
+cv.addEventListener('touchstart',e=>{tx=e.touches[0].clientX;ty=e.touches[0].clientY;},{passive:true});
+cv.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  const x=e.touches[0].clientX,y=e.touches[0].clientY,dx=x-tx,dy=y-ty;
+  if(Math.max(Math.abs(dx),Math.abs(dy))<18)return;
+  setDir(Math.abs(dx)>Math.abs(dy)?(dx>0?2:4):(dy>0?3:1));tx=x;ty=y;
+},{passive:false});
+
+const MENU_MSG='접속한 사람 중 한 명과 연결돼요. 가운데 위(노랑)와 아래(분홍)에서 출발해 땅을 넓히세요. 상대의 선을 끊거나 상대의 땅을 에워쌀 수도 있어요. 공이나 상대가 내 선을 끊으면 집으로 돌아가요. 승패는 없어요. 카메라·마이크는 상대에게만 직접 전달돼요.';
+grid=new Uint8Array(W*H);
+showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
