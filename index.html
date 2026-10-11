@@ -9,7 +9,7 @@
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 // 구글 애널리틱스(GA4): 아래 측정 ID를 본인 것(G-로 시작)으로 바꾸면 켜져요.
-const GA_ID='G-21SJJF6K0D';
+const GA_ID='G-XXXXXXXXXX';
 const GA_ON=!GA_ID.includes('XXXX');
 window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}
 if(GA_ON){
@@ -36,6 +36,8 @@ canvas{width:100%;display:block;border:3px solid var(--land);border-radius:6px;t
 #ov p{margin:0;max-width:36em;line-height:1.6;font-size:clamp(13px,2.5vw,16px)}
 button{font:inherit;font-size:16px;padding:8px 20px;border:0;border-radius:4px;background:var(--land);color:var(--ink);cursor:pointer}
 #ob{font-size:18px;padding:10px 30px}
+#ptt{background:#ff6fae;touch-action:none;user-select:none;-webkit-user-select:none}
+#ptt.on{background:#f4b942}
 button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
 #help{font-size:13px;opacity:.7;text-align:center}
 .hid{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
@@ -46,6 +48,8 @@ button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
   <span>나<b id="me">0%</b></span>
   <span>상대<b id="you">0%</b></span>
   <button id="mic">마이크 끄기</button>
+  <button id="echo" title="스피커로 들을 때 소리가 되울리는(에코) 걸 막아요">에코 방지: 꺼짐</button>
+  <button id="ptt" hidden>🎙 누르고 있는 동안 말하기</button>
   <button id="re">다른 상대 찾기</button>
 </div>
 <div id="wrap">
@@ -54,7 +58,7 @@ button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
   <video id="rv" class="hid" playsinline></video>
   <div id="ov"><h1 id="ot"></h1><p id="om"></p><button id="ob"></button></div>
 </div>
-<div id="help">방향키 / WASD / 스와이프로 이동 · 스페이스: 멈춤 · 에코 방지를 위해 이어폰을 권장해요</div>
+<div id="help">방향키 / WASD / 스와이프로 이동 · 스페이스: 멈춤 · 스피커로 들을 땐 '에코 방지'를 켜 보세요</div>
 
 <script>
 const W=90,H=60,C=10,PS=32,BALLS=1;
@@ -72,7 +76,7 @@ const TINT=['','rgba(244,185,66,.22)','rgba(255,111,174,.22)'],SOLID=['','rgba(2
 const HOME=[null,[4,30],[85,30]];
 
 let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[4,30],[85,30]],base=new Uint8Array(W*H),dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
-let role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
+let echoMode=false,role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
 let local=null,peer=null,lobby=null,conn=null,call=null,session=0,obAct=null;
 
 /* ---------- 게임 규칙 (호스트가 계산) ---------- */
@@ -282,6 +286,7 @@ async function ensureLocal(){
   try{local=await navigator.mediaDevices.getUserMedia({video:v,audio:{echoCancellation:true,noiseSuppression:true}});}
   catch(e){try{local=await navigator.mediaDevices.getUserMedia({video:v,audio:false});}catch(e2){return false;}}
   lv.srcObject=local;lv.play().catch(()=>{});
+  if(echoMode)audioOn(false);
   return true;
 }
 async function startFind(){
@@ -291,6 +296,17 @@ async function startFind(){
   track('find_match');find();
 }
 $('re').onclick=startFind;
+const audioOn=on=>{if(local)local.getAudioTracks().forEach(t=>t.enabled=on);};
+$('echo').onclick=()=>{ // 켜면 평소엔 마이크를 끄고, 버튼을 누르는 동안만 말할 수 있어요
+  echoMode=!echoMode;
+  $('echo').textContent='에코 방지: '+(echoMode?'켜짐':'꺼짐');
+  $('ptt').hidden=!echoMode;$('mic').hidden=echoMode;
+  audioOn(!echoMode);$('mic').textContent='마이크 끄기';
+};
+const ptt=$('ptt'),talk=on=>{if(!echoMode)return;audioOn(on);ptt.classList.toggle('on',on);};
+ptt.addEventListener('pointerdown',e=>{e.preventDefault();ptt.setPointerCapture(e.pointerId);talk(true);});
+['pointerup','pointercancel','lostpointercapture'].forEach(ev=>ptt.addEventListener(ev,()=>talk(false)));
+ptt.addEventListener('contextmenu',e=>e.preventDefault());
 $('mic').onclick=()=>{
   if(!local)return;
   const t=local.getAudioTracks();if(!t.length)return;
@@ -309,7 +325,7 @@ function drawCam(){ // 내 영역에는 상대 카메라, 상대 영역에는 �
     lg.globalCompositeOperation='source-over';lg.clearRect(0,0,ly.width,ly.height);
     const sc=Math.max(cv.width/vw,cv.height/vh),dw=vw*sc,dh=vh*sc;
     lg.save();
-    if(v===lv){lg.translate(cv.width,0);lg.scale(-1,1);} // 내 영상은 거울처럼
+    lg.translate(cv.width,0);lg.scale(-1,1); // 두 사람 화면이 똑같이 보이도록 모든 영상을 같은 방향으로 반전
     lg.drawImage(v,(cv.width-dw)/2,(cv.height-dh)/2,dw,dh);
     lg.restore();
     lg.globalCompositeOperation='destination-in';lg.imageSmoothingEnabled=false;
