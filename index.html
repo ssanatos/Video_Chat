@@ -6,7 +6,7 @@
 <title>땅따먹기 대전</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="peerjs.min.js"></script><!-- PeerJS 1.5.4 (MIT), 저장소에서 직접 제공 -->
 <script>
 // 구글 애널리틱스(GA4): 아래 측정 ID를 본인 것(G-로 시작)으로 바꾸면 켜져요.
 const GA_ID='G-XXXXXXXXXX';
@@ -38,6 +38,14 @@ button{font:inherit;font-size:16px;padding:8px 20px;border:0;border-radius:4px;b
 #ob{font-size:18px;padding:10px 30px}
 #ptt{background:#ff6fae;touch-action:none;user-select:none;-webkit-user-select:none}
 #ptt.on{background:#f4b942}
+button:disabled{opacity:.5;cursor:not-allowed}
+#ov{overflow:auto;justify-content:flex-start}
+#ov>h1{margin-top:auto}#ov>button{margin-bottom:auto}
+#gate{max-width:36em;font-size:clamp(12px,2.3vw,14px);line-height:1.6;text-align:left}
+#gate p{margin:0 0 8px;color:#ffd9a0;font-size:inherit}
+#gate label{display:block}
+#gate a,#foot a{color:var(--land)}
+#foot{font-size:13px;opacity:.8}
 button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
 #help{font-size:13px;opacity:.7;text-align:center}
 .hid{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
@@ -56,8 +64,14 @@ button:focus-visible{outline:3px solid #ff6fae;outline-offset:3px}
   <canvas id="c" aria-label="땅따먹기 대전 화면"></canvas>
   <video id="lv" class="hid" playsinline muted></video>
   <video id="rv" class="hid" playsinline></video>
-  <div id="ov"><h1 id="ot"></h1><p id="om"></p><button id="ob"></button></div>
+  <div id="ov"><h1 id="ot"></h1><p id="om"></p>
+    <div id="gate" style="display:none">
+      <p>⚠ 낯선 사람과 카메라·마이크로 연결돼요. 상대에게 내 IP 주소가 보일 수 있고, 상대가 화면을 녹화·캡처할 수 있어요. 불쾌하면 언제든 ‘다른 상대 찾기’로 나갈 수 있어요.</p>
+      <label><input type="checkbox" id="ag"> 만 19세 이상이며 <a href="privacy.html" target="_blank" rel="noopener">개인정보처리방침·이용 안내</a>에 동의합니다.</label>
+    </div>
+    <button id="ob"></button></div>
 </div>
+<div id="foot"><a href="privacy.html">개인정보처리방침 · 이용 안내</a></div>
 <div id="help">방향키 / WASD / 스와이프로 이동 · 스페이스: 멈춤 · 스피커로 들을 땐 '에코 방지'를 켜 보세요</div>
 
 <script>
@@ -76,7 +90,7 @@ const TINT=['','rgba(244,185,66,.22)','rgba(255,111,174,.22)'],SOLID=['','rgba(2
 const HOME=[null,[4,30],[85,30]];
 
 let grid,balls=[],tr=[null,[],[]],un=[null,[],[]],pos=[null,[4,30],[85,30]],base=new Uint8Array(W*H),dirs=[0,0,0],deaths=[0,0,0],pct=[0,0,0];
-let echoMode=false,role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
+let consented=false,echoMode=false,role=0,state='menu',acc=0,last=0,sendT=0,flash=0;
 let local=null,peer=null,lobby=null,conn=null,call=null,session=0,obAct=null;
 
 /* ---------- 게임 규칙 (호스트가 계산) ---------- */
@@ -161,9 +175,26 @@ function stepBall(b,dt){
 /* ---------- 네트워크 ---------- */
 const enc=()=>{const a=[];let p=grid[0],n=1;for(let i=1;i<grid.length;i++){if(grid[i]===p)n++;else{a.push(p,n);p=grid[i];n=1;}}a.push(p,n);return a;};
 const dec=a=>{let j=0;for(let i=0;i<a.length;i+=2){grid.fill(a[i],j,j+a[i+1]);j+=a[i+1];}};
+const isN=Number.isFinite;
+function decOk(a){ // 상대가 보낸 땅 정보가 올바른 형식인지 확인
+  if(!Array.isArray(a)||a.length%2||a.length>W*H*2)return false;
+  let n=0;
+  for(let i=0;i<a.length;i+=2){
+    const v=a[i],c=a[i+1];
+    if(!(Number.isInteger(v)&&v>=0&&v<=4&&Number.isInteger(c)&&c>0))return false;
+    n+=c;if(n>W*H)return false;
+  }
+  return n===W*H;
+}
+function stOk(d){
+  return decOk(d.g)&&Array.isArray(d.b)&&d.b.length<=8&&d.b.every(b=>Array.isArray(b)&&b.length===4&&b.every(isN))
+    &&Array.isArray(d.p)&&d.p.length===3&&[1,2].every(k=>Array.isArray(d.p[k])&&Number.isInteger(d.p[k][0])&&Number.isInteger(d.p[k][1])&&d.p[k][0]>=0&&d.p[k][0]<W&&d.p[k][1]>=0&&d.p[k][1]<H)
+    &&Array.isArray(d.d)&&d.d.length===3&&d.d.every(isN);
+}
 function onData(d){
-  if(role===1&&d.t==='in')dirs[2]=d.d;
-  else if(role===2&&d.t==='st'){
+  if(!d||typeof d!=='object')return;
+  if(role===1&&d.t==='in'){if(Number.isInteger(d.d)&&d.d>=0&&d.d<=4)dirs[2]=d.d;}
+  else if(role===2&&d.t==='st'&&stOk(d)){
     dec(d.g);balls=d.b.map(([x,y,a,s])=>({x,y,a,s}));pos=[null,d.p[1],d.p[2]];
     if(d.d[2]!==deaths[2])flash=18;
     deaths=d.d;calc();
@@ -186,12 +217,12 @@ function beginMatch(r){
 }
 function peerGone(my){
   if(my!==session)return;
-  cleanup();state='over';
+  cleanup();stopLocal();state='over';
   showOv('상대가 나갔어요','새로운 상대를 찾아볼까요?','다른 상대 찾기',startFind);
 }
 function fail(my){
   if(my!==session)return;
-  cleanup();state='over';
+  cleanup();stopLocal();state='over';
   showOv('연결에 실패했어요','잠시 후 다시 시도해 주세요.','다시 찾기',startFind);
 }
 // 대기 슬롯(lobby)은 만남만 주선하고, 실제 게임은 임의 ID의 개인 방(peer)에서 진행해요.
@@ -240,13 +271,13 @@ function joinSlot(id,my){
       c.on('error',()=>fin(false));
       c.on('close',()=>fin(false)); // 'go'를 받은 뒤의 종료는 무시됨
       c.on('data',d=>{
-        if(d.t!=='go'||done)return;
+        if(!d||d.t!=='go'||done||typeof d.id!=='string'||!/^[\w.-]{1,64}$/.test(d.id))return;
         if(my!==session){fin(false);return;}
         peer=p;fin(true);
         const c2=p.connect(d.id,{serialization:'json',reliable:true});
         const to=setTimeout(()=>{if(!conn)fail(my);},12000);
         c2.on('data',m=>{
-          if(m.t==='ready'&&!conn){conn=c2;clearTimeout(to);beginMatch(2);}
+          if(m&&m.t==='ready'&&!conn){conn=c2;clearTimeout(to);beginMatch(2);}
           else onData(m);
         });
         c2.on('close',()=>{if(conn)peerGone(my);else fail(my);});
@@ -279,7 +310,11 @@ async function find(){
       if(await trySlot(LOBBY+i,my))return;
   if(my===session)showOv('연결에 실패했어요','잠시 후 다시 시도해 주세요.','다시 찾기',startFind);
 }
-function cancel(){cleanup();state='menu';showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind);}
+function cancel(){cleanup();stopLocal();state='menu';showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind,true);}
+function stopLocal(){ // 매칭이 끝나거나 취소되면 카메라·마이크를 끔
+  if(local)local.getTracks().forEach(t=>t.stop());
+  local=null;lv.srcObject=null;
+}
 async function ensureLocal(){
   if(local)return true;
   const v={facingMode:'user',width:{ideal:960},height:{ideal:720}};
@@ -287,9 +322,11 @@ async function ensureLocal(){
   catch(e){try{local=await navigator.mediaDevices.getUserMedia({video:v,audio:false});}catch(e2){return false;}}
   lv.srcObject=local;lv.play().catch(()=>{});
   if(echoMode)audioOn(false);
+  $('mic').textContent='마이크 끄기';
   return true;
 }
 async function startFind(){
+  if(!consented){if(!$('ag').checked)return;consented=true;}
   if(!(await ensureLocal())){
     showOv('카메라 권한이 필요해요','브라우저의 카메라·마이크 권한(HTTPS 필요)을 허용한 뒤 다시 시도해 주세요.','다시 시도',startFind);return;
   }
@@ -313,7 +350,14 @@ $('mic').onclick=()=>{
   const on=!t[0].enabled;t.forEach(x=>x.enabled=on);
   $('mic').textContent=on?'마이크 끄기':'마이크 켜기';
 };
-function showOv(t,m,b,act){$('ot').textContent=t;$('om').textContent=m;$('ob').textContent=b;obAct=act;$('ov').style.display='flex';}
+function showOv(t,m,b,act,gate){
+  $('ot').textContent=t;$('om').textContent=m;$('ob').textContent=b;obAct=act;
+  const need=!!gate&&!consented;
+  $('gate').style.display=need?'block':'none';
+  $('ob').disabled=need&&!$('ag').checked;
+  $('ov').style.display='flex';
+}
+$('ag').onchange=()=>{$('ob').disabled=!$('ag').checked;};
 $('ob').onclick=()=>obAct&&obAct();
 
 /* ---------- 그리기 ---------- */
@@ -397,7 +441,7 @@ cv.addEventListener('touchmove',e=>{
 
 const MENU_MSG='접속한 사람 중 한 명과 연결돼요. 왼쪽(노랑)과 오른쪽(분홍) 기지에서 출발해 땅을 넓히세요. 내 땅에는 상대 카메라가, 상대 땅에는 내 카메라가 보여요. 기지는 상대가 들어오거나 차지할 수 없어요. 상대의 선을 끊거나, 상대가 서 있는 자리를 에워싸면 상대는 기지로 돌아가요. 승패는 없어요. 카메라·마이크는 상대에게만 직접 전달돼요.';
 grid=new Uint8Array(W*H);
-showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind);
+showOv('땅따먹기 대전',MENU_MSG,'상대 찾기',startFind,true);
 requestAnimationFrame(loop);
 </script>
 </body>
